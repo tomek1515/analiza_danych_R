@@ -3,9 +3,10 @@ title: "Projekt z analizy danych"
 author: "Tomasz Kazmierczak"
 date: "1/21/2018"
 output:
-  html_document: 
-    toc: true
-  pdf_document: default
+   html_document:
+      self_contained: false
+      keep_md: true
+      toc: true
 ---
 
 ```{r setup, include=FALSE}
