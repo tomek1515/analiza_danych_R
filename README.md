@@ -1,1 +1,170 @@
-# analiza_danych_R
+---
+title: "Projekt z analizy danych"
+author: "Tomasz Kazmierczak"
+date: "1/21/2018"
+output:
+   html_document:
+      self_contained: false
+      keep_md: true
+      toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Podsumowanie analizy
+
+Przedmiotem analizy są pomiary zgromadzone z 17 czujników umieszczonych przy panelach fotowoltaicznych. Dane zbierane były co godzinę i zawierają takie informacje, jak: dane geograficzne, dane atmosferyczne i to co jest przedmiotem analizy - wartość wytworzonej energii w kwh. Pomimo dużej liczby atrybutów, tylko niewielka ich liczba jest skorelowana z ilością wytwarzanej energii przez ogniwo fotowoltaiczne. Dane numeryczne są znormalizowane. Część danych miała wartość 0, co mogło wynikać z błędu pomiaru czujników. Brakujące dane zostały uzupełnione przez obliczenie średniej ich wartości z danego okresu.
+Analiza korelacji atrybutów wykazała, że mnajbardziej skorelowana z ilością wytwarzanej energii jest ilość promieniowania słonecznego.
+
+
+####Wykorzystane biblioteki
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(reshape2)
+library(lubridate)
+library(caret)
+library(corrplot)
+```
+
+####Wczytanie danych
+```{r}
+measurements <- read.csv("elektrownie.csv")
+```
+
+##Podsumowanie zbioru danych
+
+####Rozmiar zbioru
+```{r}
+dimensions <- dim(measurements)
+names(dimensions) <- c("wiersze", "kolumny")
+dimensions
+```
+
+####Statystyki zbioru danych
+```{r}
+summary(measurements)
+```
+
+####Sprawdzenie czy w zbiorze występuję wartości NA
+```{r}
+any(is.na(measurements))
+```
+Wartościami NA nie trzeba się zajmować, gdyż nie występują w tym zbiorze.
+
+####Sprawdzenie typów poszczególnych kolumn
+```{r}
+sapply(measurements,class)
+```
+
+####Rozkłady wartości wybranych parametrów
+```{r}
+selected <- select(measurements, lat,lon,day,ora, temperatura_ambiente, irradiamento, pressure, windspeed, humidity, cloudcoveri,tempi, irri, pressurei,windspeedi, kwh, altitude)
+ggplot(melt(selected),aes(x = value)) + 
+    facet_wrap(~variable,ncol=4,scales = "free_x") + geom_histogram(bins = 30) + scale_x_continuous(labels = scales::comma)
+```
+
+####Opis zmiennych w zbiorze danych
+id - identyfikator  
+idsito - id ogniwa  
+idmodel - id modelu ogniwa  
+idbrand - id marki ogniwa  
+lat -szerekosc geograficzna w której znajduje się czujnik  
+lon - długość geograficzna w której znajduje się czujnik  
+ageinmonths - wiek ogniwa fotowoltaicznego  
+anno - rok  
+day - dzień  
+ora - godzina (przyjmuje wartości od 0 do 1, przeskalowana dopowiednio dla godzin do 2.00 do 20.00)  
+data - data i czas w formacie MM/DD/YYYY HH:MM  
+temperatura_ambiente - temperatura otoczenia  
+irradiamento - wielkość promieniowania  
+pressure - ciśnienie  
+windspeed - prędkość wiatru  
+humidity - wilgotność  
+dewpoint - punkt rosy  
+cloud cover - zachmurzenie  
+altitude - wysokość 
+azimuth - azymut  
+pcnm1 - pcnm15 - pomiary z czujników  
+kwh - kilowatogodziny  
+
+##Przygotowanie danych
+####Wyznaczenie liczby zerowych wartości irradiamento oraz kwh
+```{r}
+c(sum(measurements$irradiamento == 0), sum(measurements$kwh == 0))
+```
+Jak widać w zbiorze jest minimalnie więcej wartości zerowych dla kwh niż irradiamento. Może to wynikać z błędu czujnika, bądź promieniowanie jest zbyt małe, aby wytworzyć jakąkolwiek energię.
+
+####Uzupełnienie wartości zerowych dla irradiamento i kwh
+```{r}
+measurements$data <- as.POSIXct(strptime(measurements$data, "%m/%d/%Y %k:%M", tz="GMT"))
+measurements <- measurements %>% mutate(month = month(data))
+measurements <- measurements %>% group_by(idsito, anno, month, ora) %>% mutate(kwh = ifelse(kwh == 0, mean(kwh), kwh))
+measurements <- measurements %>% group_by(idsito, anno, month) %>% mutate(irradiamento = ifelse(irradiamento == 0 & kwh > 0, mean(irradiamento), irradiamento))
+```
+Stworzona została kolumna month, która będzie pomocna w kolejnych operacjach grupowania. Zerowe wartości kwh zostały zastąpione średnią wartościa kwh danego czujnika, w danym roku, miesiącu i tej samej godzinie.
+Sytuacje, gdzie irradiamento jest równe 0, a kwh > 0 wydają się być błędne, tzn. trudno uzasadnić sytuację, gdy nie ma promieniowania słonecznego, mimo to wytwarzana jest energia. W tym przypadku wartość irradiamento została zastąpiona srednią wartością danego czujnika, w danym roku i miesiącu.
+
+```{r}
+c(sum(measurements$irradiamento == 0), sum(measurements$kwh == 0))
+```
+Przeprowadzony zabieg znacznie zmniejszył ilość wartości zerowych irradiamento oraz kwh.
+
+####Korelogram
+```{r}
+measurements_table <- cor(measurements %>% select(-data))
+corrplot(measurements_table, type = "upper", order = "hclust", 
+          tl.col = "black", tl.srt = 90, method="square")
+```
+   
+Korelogram ukazuje interesujące związki:  
+
+* duża antykorelacja między wytwarzaną energią kwh, a wilgotością humidity. Duża wilgotność występuje w pochmurne dni, co za tym idzie mało światła słonecznego dociera do paneli, które wytwarzają mniej energii
+* silna dodatnia korelacja między ilością nasłonecznienia, a ilością wytwarzanej energii - jest to spodziewana zależność
+* silna korelacja między godziną (ora), a azymutem. Wraz z godziną rośnie kąt, skąd pada światło słoneczne względem północy
+
+###Korelacja atrybutów względem kwh
+```{r}
+kwh_correlations <- melt(measurements_table['kwh',])
+ggplot(kwh_correlations, aes(x=rownames(kwh_correlations), y=value)) + geom_bar(stat="identity") +labs(title = "Korelacja względem atrybutu kwh", x = "Atrybuty", y = "Wartość korelacji") + coord_flip()
+```
+
+####Interaktywny wykres prezentujący wytwarzaną energię przez poszczególne ogniwa w ujęciu miesięcznym
+```{r}
+wykres <- measurements %>% group_by(idsito,anno,month) %>% summarise(kwh = sum(kwh))
+ggplotwykres <- ggplot(data = wykres, aes(month,kwh, frame=idsito, color=factor(anno))) + 
+  geom_point() + labs(x="miesiac", y="kwh", color="rok") + scale_y_continuous(limits = c(0, 140))
+ggplotly(ggplotwykres,dynamicTicks = TRUE,width = NULL, height = NULL)
+
+```
+Na wykresie można zauważyć, że w miesiącach letnich produkowana jest większa ilość energii niż zimą. Zależność to wydaje się oczywista.
+
+##Model uczenia i regresor
+```{r}
+measurements_model <- measurements %>% select(idsito, irradiamento, irr_pvgis_mod, humidity, azimuthi, altitude, irri, tempi, ora, day, kwh, month, anno)
+
+set.seed(17)
+inTraining <- 
+    createDataPartition(
+        y = measurements_model$kwh,
+        p = .75,
+        list = FALSE)
+
+training <- measurements_model[inTraining,]
+testing <- measurements_model[-inTraining,]
+
+ctrl <- trainControl(method = "repeatedcv", number = 10, preProcOptions = c("center", "scale"))
+
+fit_rf <- train(kwh ~ ., data = training,method = "rf", trControl = ctrl, ntree = 10)
+
+fit_rf
+```
+
+```{r}
+prediction <- predict(fit_rf, newdata = testing)
+defaultSummary(data.frame(pred = prediction, obs = testing$kwh))
+```
+Do predykcji wykorzystany został Random Forest. Z analizy korelacji względem zmiennej kwh można odkryć, że atrybut kwh jest najbardziej skorelowany ze zmiennymi irradiamento oraz irr_pvgis_mod. Największa ujemna koleracja zmiennej kwh jest ze zmiennymi humidity(wilgotność) oraz azimuthi(azumut).
